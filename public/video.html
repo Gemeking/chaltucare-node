@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>ChaltuCare Video Call</title>
+</head>
+<body>
+  <h2>ChaltuCare Video Call (HTML Test)</h2>
+
+  <video id="localVideo" autoplay muted playsinline></video>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+  <br><br>
+  <button onclick="joinRoom()">Join Call</button>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const roomId = "test-room";
+
+    let localStream;
+    let peerConnection;
+
+    const config = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+
+    async function joinRoom() {
+      socket.emit('join-room', roomId);
+
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+      });
+
+      document.getElementById('localVideo').srcObject = localStream;
+
+      peerConnection = new RTCPeerConnection(config);
+
+      localStream.getTracks().forEach(track =>
+        peerConnection.addTrack(track, localStream)
+      );
+
+      peerConnection.ontrack = (event) => {
+        document.getElementById('remoteVideo').srcObject = event.streams[0];
+      };
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('signal', {
+            roomId,
+            data: { candidate: event.candidate }
+          });
+        }
+      };
+
+      socket.on('signal', async (data) => {
+        if (data.offer) {
+          await peerConnection.setRemoteDescription(data.offer);
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          socket.emit('signal', {
+            roomId,
+            data: { answer }
+          });
+        }
+
+        if (data.answer) {
+          await peerConnection.setRemoteDescription(data.answer);
+        }
+
+        if (data.candidate) {
+          await peerConnection.addIceCandidate(data.candidate);
+        }
+      });
+
+      socket.on('user-joined', async () => {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        socket.emit('signal', {
+          roomId,
+          data: { offer }
+        });
+      });
+    }
+  </script>
+</body>
+</html>
