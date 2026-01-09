@@ -152,3 +152,25 @@ exports.resendVerification = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// Add this to your auth.controller.js
+exports.testEmail = async (req, res) => {
+  try {
+    const testEmail = req.body.email || 'test@example.com';
+    
+    await transporter.sendMail({
+      from: '"Test" <test@example.com>',
+      to: testEmail,
+      subject: 'Test Email from ChaltuCare',
+      text: 'This is a test email.',
+    });
+    
+    res.json({ message: 'Test email sent successfully' });
+  } catch (error) {
+    console.error('Email test error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      details: 'Check mail configuration'
+    });
+  }
+};
