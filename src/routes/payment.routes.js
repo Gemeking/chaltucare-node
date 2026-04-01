@@ -1,17 +1,22 @@
 const express = require('express');
 const router = express.Router();
+const paymentController = require('../controllers/payment.controller');
+const authMiddleware = require('../middleware/auth.middleware');
+const upload = require('../config/upload.config');
 
-// Simple routes for testing
-router.get('/test', (req, res) => {
-    res.json({ message: 'Payment routes working' });
-});
+// Apply auth middleware to all payment routes
+router.use(authMiddleware);
 
-router.post('/create-payment-intent', (req, res) => {
-    res.json({ message: 'Create payment intent endpoint - to be implemented' });
-});
+// Payment routes
+router.post('/create-payment-intent', paymentController.createPaymentIntent.bind(paymentController));
+router.post('/confirm', paymentController.confirmPayment.bind(paymentController));
+router.get('/status/:paymentId', paymentController.getPaymentStatus.bind(paymentController));
+router.get('/history', paymentController.getUserPayments.bind(paymentController));
 
-router.get('/status/:paymentId', (req, res) => {
-    res.json({ message: `Payment status for ${req.params.paymentId} - to be implemented` });
-});
+// Payment screenshot upload route - make sure the endpoint matches
+router.post('/upload-screenshot', upload.single('file'), (req, res, next) => {
+    console.log('Payment upload endpoint hit');
+    next();
+}, paymentController.uploadPaymentScreenshot.bind(paymentController));
 
 module.exports = router;
