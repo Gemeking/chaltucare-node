@@ -2,7 +2,8 @@ const pool = require('../config/db');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const transporter = require('../config/mail');
-const jwt = require('jsonwebtoken'); // Only declare once at the top
+const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
 
 // Register user
 exports.register = async (req, res) => {
@@ -13,20 +14,15 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Generate verification token
     const token = crypto.randomBytes(32).toString('hex');
 
-    // Save user in DB
     await pool.query(
       `INSERT INTO users (name, email, password, role, verification_token)
        VALUES ($1, $2, $3, $4, $5)`,
       [name, email, hashedPassword, role, token]
     );
 
-    // Send verification email
     const verifyLink = `http://localhost:5000/api/auth/verify/${token}`;
 
     await transporter.sendMail({
@@ -178,9 +174,14 @@ exports.testEmail = async (req, res) => {
   }
 };
 
+// ============================================
+// PROFILE METHODS
+// ============================================
+
 // Get user profile
 exports.getProfile = async (req, res) => {
   try {
+    console.log('Getting profile for user:', req.user.id);
     const userId = req.user.id;
     
     const result = await pool.query(
@@ -197,7 +198,7 @@ exports.getProfile = async (req, res) => {
     
     res.json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    console.error('Error in getProfile:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -208,19 +209,41 @@ exports.updateProfile = async (req, res) => {
     const userId = req.user.id;
     const { name, phone, date_of_birth, address, bio } = req.body;
     
-    // Update user profile
-    const result = await pool.query(
-      `UPDATE users 
-       SET name = COALESCE($1, name),
-           phone = COALESCE($2, phone),
-           date_of_birth = COALESCE($3, date_of_birth),
-           address = COALESCE($4, address),
-           bio = COALESCE($5, bio),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $6
-       RETURNING id, name, email, role, phone, date_of_birth, address, bio, profile_picture`,
-      [name, phone, date_of_birth, address, bio, userId]
-    );
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (name !== undefined) {
+      updates.push(`name = $${paramCount++}`);
+      values.push(name);
+    }
+    if (phone !== undefined) {
+      updates.push(`phone = $${paramCount++}`);
+      values.push(phone);
+    }
+    if (date_of_birth !== undefined) {
+      updates.push(`date_of_birth = $${paramCount++}`);
+      values.push(date_of_birth);
+    }
+    if (address !== undefined) {
+      updates.push(`address = $${paramCount++}`);
+      values.push(address);
+    }
+    if (bio !== undefined) {
+      updates.push(`bio = $${paramCount++}`);
+      values.push(bio);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+    
+    updates.push(`updated_at = CURRENT_TIMESTAMP`);
+    values.push(userId);
+    
+    const query = `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING id, name, email, role, phone, date_of_birth, address, bio, profile_picture`;
+    
+    const result = await pool.query(query, values);
     
     if (result.rows.length === 0) {
       return res.status(404).json({ message: 'User not found' });
@@ -231,7 +254,7 @@ exports.updateProfile = async (req, res) => {
       user: result.rows[0]
     });
   } catch (err) {
-    console.error(err);
+    console.error('Error updating profile:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -260,7 +283,7 @@ exports.uploadProfilePicture = async (req, res) => {
       user: result.rows[0]
     });
   } catch (err) {
-    console.error(err);
+    console.error('Error uploading profile picture:', err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -269,19 +292,19 @@ exports.uploadProfilePicture = async (req, res) => {
 exports.changePassword = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, hasNoPassword } = req.body;
     
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ message: 'Current password and new password are required' });
+    if (!newPassword) {
+      return res.status(400).json({ message: 'New password is required' });
     }
     
     if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
     }
     
-    // Get current user
+    // Get current user to check if they have a password
     const userResult = await pool.query(
-      `SELECT password FROM users WHERE id = $1`,
+      `SELECT password, google_id FROM users WHERE id = $1`,
       [userId]
     );
     
@@ -289,22 +312,75 @@ exports.changePassword = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
     
-    // Verify current password
-    const validPassword = await bcrypt.compare(currentPassword, userResult.rows[0].password);
+    const user = userResult.rows[0];
+    const hasExistingPassword = user.password && user.password !== '';
+    const isGoogleUser = user.google_id && !hasExistingPassword;
+    
+    console.log('User info:', { hasExistingPassword, isGoogleUser, hasNoPassword });
+    
+    // For Google users (no existing password) or if explicitly marked as no password
+    if ((isGoogleUser || !hasExistingPassword || hasNoPassword) && !currentPassword) {
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      
+      await pool.query(
+        `UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [hashedPassword, userId]
+      );
+      
+      return res.json({ 
+        message: 'Password set successfully! You can now login with this password.',
+        isNewPassword: true 
+      });
+    }
+    
+    // Regular user with existing password - need to verify current password
+    if (!currentPassword) {
+      return res.status(400).json({ message: 'Current password is required' });
+    }
+    
+    const validPassword = await bcrypt.compare(currentPassword, user.password);
     if (!validPassword) {
       return res.status(401).json({ message: 'Current password is incorrect' });
     }
     
-    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     
-    // Update password
     await pool.query(
       `UPDATE users SET password = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
       [hashedPassword, userId]
     );
     
     res.json({ message: 'Password changed successfully' });
+    
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Check if user has a password set
+exports.checkPasswordStatus = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    const result = await pool.query(
+      `SELECT password, google_id FROM users WHERE id = $1`,
+      [userId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    const user = result.rows[0];
+    const hasPassword = user.password && user.password !== '';
+    const isGoogleUser = user.google_id && !hasPassword;
+    
+    res.json({
+      hasPassword: hasPassword,
+      isGoogleUser: isGoogleUser,
+      canSetPassword: !hasPassword
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -318,10 +394,7 @@ exports.deleteAccount = async (req, res) => {
     const userId = req.user.id;
     
     await client.query('BEGIN');
-    
-    // Delete user data (cascade will handle related records)
     await client.query(`DELETE FROM users WHERE id = $1`, [userId]);
-    
     await client.query('COMMIT');
     
     res.json({ message: 'Account deleted successfully' });
@@ -339,7 +412,6 @@ exports.getUserStats = async (req, res) => {
   try {
     const userId = req.user.id;
     
-    // Get appointment stats
     const appointmentStats = await pool.query(
       `SELECT 
          COUNT(*) as total_appointments,
@@ -350,7 +422,6 @@ exports.getUserStats = async (req, res) => {
       [userId]
     );
     
-    // Get payment stats
     const paymentStats = await pool.query(
       `SELECT 
          COUNT(*) as total_payments,
@@ -360,7 +431,6 @@ exports.getUserStats = async (req, res) => {
       [userId]
     );
     
-    // Get message stats
     const messageStats = await pool.query(
       `SELECT COUNT(*) as total_messages
        FROM messages 
@@ -376,5 +446,362 @@ exports.getUserStats = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  }
+};
+
+// ============================================
+// GOOGLE AUTH METHODS
+// ============================================
+
+// Test Google token endpoint
+exports.testGoogleToken = async (req, res) => {
+  try {
+    const { token } = req.body;
+    
+    console.log('Test Google token received:', token ? 'Yes (length: ' + token.length + ')' : 'No');
+    
+    if (!token) {
+      return res.status(400).json({ error: 'No token provided' });
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Token received, backend is working',
+      token_received: true 
+    });
+  } catch (error) {
+    console.error('Test error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Google token verification
+exports.verifyGoogleToken = async (req, res) => {
+  try {
+    console.log('=== Google Token Verification Started ===');
+    const { token } = req.body;
+    
+    console.log('Token received:', token ? 'Yes (length: ' + token.length + ')' : 'No');
+    
+    if (!token) {
+      console.log('No token provided');
+      return res.status(400).json({ error: 'No token provided' });
+    }
+    
+    // Check if columns exist before using them
+    const columnsCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'users'
+    `);
+    
+    const existingColumns = columnsCheck.rows.map(row => row.column_name);
+    console.log('Existing columns:', existingColumns);
+    
+    console.log('Initializing Google OAuth2 client...');
+    console.log('Google Client ID:', process.env.GOOGLE_CLIENT_ID);
+    
+    const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+    
+    console.log('Verifying token with Google...');
+    const ticket = await client.verifyIdToken({
+      idToken: token,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+    
+    console.log('Token verified successfully');
+    const payload = ticket.getPayload();
+    console.log('Google payload:', JSON.stringify(payload, null, 2));
+    
+    const { email, name, sub: googleId, picture } = payload;
+    console.log('Extracted user info:', { email, name, googleId });
+    
+    // Check if user exists
+    let userResult = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+    
+    let user;
+    
+    if (userResult.rows.length === 0) {
+      // Create new user
+      console.log('Creating new user...');
+      const randomPassword = crypto.randomBytes(20).toString('hex');
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+      
+      // Build dynamic insert query based on existing columns
+      let insertFields = ['name', 'email', 'password', 'role', 'is_verified'];
+      let insertValues = [name, email, hashedPassword, 'user', true];
+      let paramCount = 6;
+      
+      if (existingColumns.includes('google_id')) {
+        insertFields.push('google_id');
+        insertValues.push(googleId);
+        paramCount++;
+      }
+      if (existingColumns.includes('profile_picture')) {
+        insertFields.push('profile_picture');
+        insertValues.push(picture);
+        paramCount++;
+      }
+      if (existingColumns.includes('created_at')) {
+        insertFields.push('created_at');
+        insertValues.push(new Date());
+        paramCount++;
+      }
+      if (existingColumns.includes('updated_at')) {
+        insertFields.push('updated_at');
+        insertValues.push(new Date());
+      }
+      
+      const placeholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
+      const insertQuery = `INSERT INTO users (${insertFields.join(', ')}) VALUES (${placeholders}) RETURNING id, name, email, role`;
+      
+      console.log('Insert query:', insertQuery);
+      userResult = await pool.query(insertQuery, insertValues);
+      user = userResult.rows[0];
+      console.log('New user created:', user);
+    } else {
+      user = userResult.rows[0];
+      console.log('Existing user found:', user);
+      
+      // Update google_id if not set and column exists
+      if (existingColumns.includes('google_id') && !user.google_id) {
+        const updateQuery = `UPDATE users SET google_id = $1, profile_picture = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`;
+        await pool.query(updateQuery, [googleId, picture, user.id]);
+        user.google_id = googleId;
+        user.profile_picture = picture;
+        console.log('Updated user with Google info');
+      }
+    }
+    
+    // Create JWT
+    const jwtToken = jwt.sign(
+      { id: user.id, role: user.role, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    console.log('JWT created for user:', user.id);
+    
+    res.json({
+      success: true,
+      message: 'Google login successful',
+      token: jwtToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        profile_picture: user.profile_picture || null
+      }
+    });
+    
+  } catch (error) {
+    console.error('=== Google Token Verification Error ===');
+    console.error('Error name:', error.name);
+    console.error('Error message:', error.message);
+    console.error('Full error:', error);
+    res.status(500).json({ error: 'Google authentication failed', details: error.message });
+  }
+};
+
+// Get user's current plan based on their latest confirmed appointment
+// Get user's current plan based on their latest confirmed appointment
+// Get user's current plan based on their latest confirmed appointment
+exports.getUserPlan = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    console.log('Getting plan for user:', userId);
+    
+    // Get the most recent confirmed appointment that is not expired
+    const result = await pool.query(
+      `SELECT p.*, a.appointment_date, a.status, a.payment_status, a.doctor_id, a.id as appointment_id
+       FROM appointments a
+       JOIN plans p ON p.id = a.plan_id
+       WHERE a.patient_id = $1 
+       AND a.status = 'confirmed'
+       AND a.payment_status = 'paid'
+       AND a.appointment_date >= CURRENT_DATE
+       ORDER BY a.appointment_date DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    console.log('Active confirmed appointment query result:', result.rows.length);
+    
+    if (result.rows.length > 0) {
+      const plan = result.rows[0];
+      let features = plan.features;
+      if (typeof features === 'string') {
+        try {
+          features = JSON.parse(features);
+        } catch (e) {
+          features = { chat: true, video: false, file_sharing: true };
+        }
+      }
+      
+      // Ensure chat is always true for any active plan
+      features.chat = true;
+      
+      return res.json({
+        hasActivePlan: true,
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          price: plan.price,
+          features: features,
+          valid_until: plan.appointment_date,
+          status: plan.status,
+          payment_status: plan.payment_status,
+          doctor_id: plan.doctor_id,
+          appointment_id: plan.appointment_id
+        }
+      });
+    }
+    
+    // Check for pending appointments (waiting for doctor approval)
+    const pendingResult = await pool.query(
+      `SELECT p.*, a.appointment_date, a.status, a.payment_status, a.doctor_id, a.id as appointment_id,
+              d.name as doctor_name
+       FROM appointments a
+       JOIN plans p ON p.id = a.plan_id
+       JOIN users d ON d.id = a.doctor_id
+       WHERE a.patient_id = $1 
+       AND a.status = 'pending'
+       AND a.payment_status = 'pending_verification'
+       ORDER BY a.appointment_date DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    if (pendingResult.rows.length > 0) {
+      const pending = pendingResult.rows[0];
+      return res.json({
+        hasActivePlan: false,
+        plan: null,
+        pendingApproval: true,
+        message: 'Your payment is pending doctor approval. You will be able to chat once approved.',
+        doctor_id: pending.doctor_id,
+        doctor_name: pending.doctor_name,
+        appointment_id: pending.appointment_id
+      });
+    }
+    
+    // Check for expired appointments (past date)
+    const expiredResult = await pool.query(
+      `SELECT p.*, a.appointment_date, a.status, a.payment_status
+       FROM appointments a
+       JOIN plans p ON p.id = a.plan_id
+       WHERE a.patient_id = $1 
+       AND a.status = 'confirmed'
+       AND a.payment_status = 'paid'
+       AND a.appointment_date < CURRENT_DATE
+       ORDER BY a.appointment_date DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    if (expiredResult.rows.length > 0) {
+      return res.json({
+        hasActivePlan: false,
+        plan: null,
+        expired: true,
+        message: 'Your consultation period has ended. Please book a new appointment to continue chatting.',
+        expired_date: expiredResult.rows[0].appointment_date
+      });
+    }
+    
+    return res.json({ 
+      hasActivePlan: false, 
+      plan: null,
+      features: { chat: true, video: false, file_sharing: true },
+      message: 'No active appointment found'
+    });
+    
+  } catch (error) {
+    console.error('Error getting user plan:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Get user's assigned doctor
+// Get user's assigned doctor
+exports.getAssignedDoctor = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Get the most recent confirmed appointment
+    const result = await pool.query(
+      `SELECT d.id, d.name, d.email, d.role, a.plan_id, p.name as plan_name, p.features, a.status, a.payment_status
+       FROM appointments a
+       JOIN users d ON d.id = a.doctor_id
+       JOIN plans p ON p.id = a.plan_id
+       WHERE a.patient_id = $1 
+       AND a.status = 'confirmed'
+       AND a.payment_status = 'paid'
+       ORDER BY a.appointment_date DESC
+       LIMIT 1`,
+      [userId]
+    );
+    
+    console.log('Assigned doctor query result:', result.rows.length);
+    
+    if (result.rows.length === 0) {
+      // Check for pending approval
+      const pendingResult = await pool.query(
+        `SELECT d.id, d.name, d.email, d.role, a.plan_id, p.name as plan_name, p.features, a.status, a.payment_status
+         FROM appointments a
+         JOIN users d ON d.id = a.doctor_id
+         JOIN plans p ON p.id = a.plan_id
+         WHERE a.patient_id = $1 
+         AND a.status = 'pending'
+         AND a.payment_status = 'pending_verification'
+         ORDER BY a.appointment_date DESC
+         LIMIT 1`,
+        [userId]
+      );
+      
+      if (pendingResult.rows.length > 0) {
+        return res.json({ 
+          hasAssignedDoctor: false, 
+          doctor: null,
+          pendingApproval: true,
+          doctor_name: pendingResult.rows[0].name,
+          doctor_id: pendingResult.rows[0].id
+        });
+      }
+      
+      return res.json({ hasAssignedDoctor: false, doctor: null });
+    }
+    
+    const doctor = result.rows[0];
+    let features = doctor.features;
+    if (typeof features === 'string') {
+      try {
+        features = JSON.parse(features);
+      } catch (e) {
+        features = { chat: true, video: false, file_sharing: true };
+      }
+    }
+    
+    res.json({
+      hasAssignedDoctor: true,
+      doctor: {
+        id: doctor.id,
+        name: doctor.name,
+        email: doctor.email,
+        role: doctor.role,
+        plan_id: doctor.plan_id,
+        plan_name: doctor.plan_name,
+        features: features,
+        appointment_status: doctor.status
+      }
+    });
+  } catch (error) {
+    console.error('Error getting assigned doctor:', error);
+    res.status(500).json({ error: error.message });
   }
 };

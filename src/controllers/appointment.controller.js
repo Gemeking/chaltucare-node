@@ -1,18 +1,157 @@
 const pool = require('../config/db');
 
 class AppointmentController {
+
+    // Create a new plan (admin only)
+    async createPlan(req, res) {
+        try {
+            const { name, description, price, duration_minutes, features, is_active } = req.body;
+            
+            console.log('Creating plan:', { name, description, price, duration_minutes, features, is_active });
+            
+            if (!name || !price) {
+                return res.status(400).json({ error: 'Name and price are required' });
+            }
+            
+            const result = await pool.query(
+                `INSERT INTO plans (name, description, price, duration_minutes, features, is_active)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 RETURNING *`,
+                [name, description, price, duration_minutes || 30, features || {}, is_active !== false]
+            );
+            
+            console.log('Plan created:', result.rows[0]);
+            res.status(201).json(result.rows[0]);
+        } catch (error) {
+            console.error('Error creating plan:', error);
+            res.status(500).json({ error: 'Failed to create plan', details: error.message });
+        }
+    }
+
+    // Update a plan (admin only)
+    async updatePlan(req, res) {
+        try {
+            const { id } = req.params;
+            const { name, description, price, duration_minutes, features, is_active } = req.body;
+            
+            console.log('Updating plan:', { id, name, description, price, duration_minutes, features, is_active });
+            
+            const existingPlan = await pool.query('SELECT * FROM plans WHERE id = $1', [id]);
+            if (existingPlan.rows.length === 0) {
+                return res.status(404).json({ error: 'Plan not found' });
+            }
+            
+            const updates = [];
+            const values = [];
+            let paramCount = 1;
+            
+            if (name !== undefined) {
+                updates.push(`name = $${paramCount++}`);
+                values.push(name);
+            }
+            if (description !== undefined) {
+                updates.push(`description = $${paramCount++}`);
+                values.push(description);
+            }
+            if (price !== undefined) {
+                updates.push(`price = $${paramCount++}`);
+                values.push(price);
+            }
+            if (duration_minutes !== undefined) {
+                updates.push(`duration_minutes = $${paramCount++}`);
+                values.push(duration_minutes);
+            }
+            if (features !== undefined) {
+                updates.push(`features = $${paramCount++}`);
+                values.push(features);
+            }
+            if (is_active !== undefined) {
+                updates.push(`is_active = $${paramCount++}`);
+                values.push(is_active);
+            }
+            
+            if (updates.length === 0) {
+                return res.status(400).json({ error: 'No fields to update' });
+            }
+            
+            updates.push(`updated_at = CURRENT_TIMESTAMP`);
+            values.push(id);
+            
+            const query = `UPDATE plans SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`;
+            const result = await pool.query(query, values);
+            
+            res.json(result.rows[0]);
+        } catch (error) {
+            console.error('Error updating plan:', error);
+            res.status(500).json({ error: 'Failed to update plan', details: error.message });
+        }
+    }
+
+    // Delete a plan (admin only)
+    async deletePlan(req, res) {
+        try {
+            const { id } = req.params;
+            
+            const usageCheck = await pool.query(
+                'SELECT id FROM appointments WHERE plan_id = $1 LIMIT 1',
+                [id]
+            );
+            
+            if (usageCheck.rows.length > 0) {
+                return res.status(400).json({ error: 'Cannot delete plan that has appointments. Deactivate it instead.' });
+            }
+            
+            const result = await pool.query('DELETE FROM plans WHERE id = $1 RETURNING id', [id]);
+            
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: 'Plan not found' });
+            }
+            
+            res.json({ message: 'Plan deleted successfully' });
+        } catch (error) {
+            console.error('Error deleting plan:', error);
+            res.status(500).json({ error: 'Failed to delete plan' });
+        }
+    }
+
+    // Toggle plan active status (admin only)
+    async togglePlan(req, res) {
+        try {
+            const { id } = req.params;
+            const { is_active } = req.body;
+            
+            const existingPlan = await pool.query('SELECT * FROM plans WHERE id = $1', [id]);
+            if (existingPlan.rows.length === 0) {
+                return res.status(404).json({ error: 'Plan not found' });
+            }
+            
+            const result = await pool.query(
+                `UPDATE plans SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+                [is_active, id]
+            );
+            
+            res.json(result.rows[0]);
+        } catch (error) {
+            console.error('Error toggling plan:', error);
+            res.status(500).json({ error: 'Failed to toggle plan' });
+        }
+    }
+
     // Get all plans
     async getPlans(req, res) {
         try {
-            console.log('Fetching plans from database...');
-            const result = await pool.query(
-                'SELECT * FROM plans WHERE is_active = true ORDER BY price'
-            );
-            console.log('Plans found:', result.rows.length);
+            let query;
+            if (req.user && req.user.role === 'admin') {
+                query = 'SELECT * FROM plans ORDER BY price';
+            } else {
+                query = 'SELECT * FROM plans WHERE is_active = true ORDER BY price';
+            }
+            
+            const result = await pool.query(query);
             res.json(result.rows);
         } catch (error) {
             console.error('Error fetching plans:', error);
-            res.status(500).json({ error: 'Failed to fetch plans', details: error.message });
+            res.status(500).json({ error: 'Failed to fetch plans' });
         }
     }
 
@@ -20,7 +159,7 @@ class AppointmentController {
     async createAppointment(req, res) {
         const client = await pool.connect();
         try {
-            const { doctor_id, plan_id, appointment_date, appointment_time, reason, amount } = req.body;
+            const { doctor_id, plan_id, appointment_date, appointment_time, reason } = req.body;
             const patient_id = req.user.id;
 
             if (!doctor_id || !plan_id || !appointment_date || !appointment_time) {
@@ -29,7 +168,6 @@ class AppointmentController {
 
             await client.query('BEGIN');
 
-            // Check if doctor exists
             const doctorCheck = await client.query(
                 'SELECT id, name, email FROM users WHERE id = $1 AND role = $2',
                 [doctor_id, 'doctor']
@@ -39,7 +177,6 @@ class AppointmentController {
                 return res.status(404).json({ error: 'Doctor not found' });
             }
 
-            // Check if plan exists
             const planCheck = await client.query(
                 'SELECT * FROM plans WHERE id = $1 AND is_active = true',
                 [plan_id]
@@ -49,7 +186,6 @@ class AppointmentController {
                 return res.status(404).json({ error: 'Plan not found' });
             }
 
-            // Check if slot is available
             const slotCheck = await client.query(
                 `SELECT id FROM appointments 
                  WHERE doctor_id = $1 
@@ -64,7 +200,6 @@ class AppointmentController {
                 return res.status(409).json({ error: 'Time slot already booked' });
             }
 
-            // Create appointment
             const result = await client.query(
                 `INSERT INTO appointments 
                  (patient_id, doctor_id, plan_id, appointment_date, appointment_time, reason, status, payment_status)
@@ -77,6 +212,27 @@ class AppointmentController {
 
             await client.query('COMMIT');
 
+            // Send notifications
+            if (global.sendNotification) {
+                // Notify doctor
+                await global.sendNotification(
+                    doctor_id,
+                    'new_appointment',
+                    'New Appointment Request',
+                    `New appointment request from ${doctorCheck.rows[0].name} on ${appointment_date} at ${appointment_time}`,
+                    { appointment_id: appointment.id, patient_name: doctorCheck.rows[0].name, appointment_date, appointment_time }
+                );
+                
+                // Notify patient
+                await global.sendNotification(
+                    patient_id,
+                    'appointment_created',
+                    'Appointment Created',
+                    `Your appointment has been created. Please complete payment to confirm.`,
+                    { appointment_id: appointment.id }
+                );
+            }
+
             res.status(201).json({
                 ...appointment,
                 doctor: doctorCheck.rows[0],
@@ -86,7 +242,7 @@ class AppointmentController {
         } catch (error) {
             await client.query('ROLLBACK');
             console.error('Error creating appointment:', error);
-            res.status(500).json({ error: 'Failed to create appointment' });
+            res.status(500).json({ error: 'Failed to create appointment', details: error.message });
         } finally {
             client.release();
         }
@@ -128,7 +284,7 @@ class AppointmentController {
         }
     }
 
-    // Get doctor's appointments
+    // Get doctor's appointments with payment details
     async getDoctorAppointments(req, res) {
         try {
             const doctorId = req.user.id;
@@ -139,10 +295,15 @@ class AppointmentController {
                        u.name as patient_name, 
                        u.email as patient_email,
                        p.name as plan_name,
-                       p.price as plan_price
+                       p.price as plan_price,
+                       pay.payment_id,
+                       pay.status as payment_status,
+                       pay.notes as payment_notes,
+                       pay.created_at as payment_date
                 FROM appointments a
                 JOIN users u ON u.id = a.patient_id
                 JOIN plans p ON p.id = a.plan_id
+                LEFT JOIN payments pay ON pay.appointment_id = a.id
                 WHERE a.doctor_id = $1
             `;
             const params = [doctorId];
@@ -162,8 +323,22 @@ class AppointmentController {
             query += ` ORDER BY a.appointment_date ASC, a.appointment_time ASC`;
 
             const result = await pool.query(query, params);
-            res.json(result.rows);
-
+            
+            const appointments = result.rows.map(apt => {
+                let screenshotUrl = null;
+                if (apt.payment_notes && apt.payment_notes.includes('Payment Screenshot:')) {
+                    const match = apt.payment_notes.match(/Payment Screenshot: (\/uploads\/payments\/[^\s]+)/);
+                    if (match) {
+                        screenshotUrl = match[1];
+                    }
+                }
+                return {
+                    ...apt,
+                    screenshot_url: screenshotUrl
+                };
+            });
+            
+            res.json(appointments);
         } catch (error) {
             console.error('Error fetching doctor appointments:', error);
             res.status(500).json({ error: 'Failed to fetch appointments' });
@@ -171,49 +346,69 @@ class AppointmentController {
     }
 
     // Update appointment status
-    async updateAppointmentStatus(req, res) {
-        try {
-            const { id } = req.params;
-            const { status, notes } = req.body;
-            const userId = req.user.id;
-            const userRole = req.user.role;
+    // Update appointment status
+async updateAppointmentStatus(req, res) {
+    try {
+        const { id } = req.params;
+        const { status, notes } = req.body;
+        const userId = req.user.id;
+        const userRole = req.user.role;
 
-            // Check if appointment exists and user has permission
-            const appointment = await pool.query(
-                `SELECT * FROM appointments WHERE id = $1`,
-                [id]
-            );
+        console.log('Updating appointment status:', { id, status, notes, userRole });
 
-            if (appointment.rows.length === 0) {
-                return res.status(404).json({ error: 'Appointment not found' });
-            }
+        // Check if appointment exists and user has permission
+        const appointment = await pool.query(`SELECT * FROM appointments WHERE id = $1`, [id]);
 
-            const appt = appointment.rows[0];
-
-            // Check permissions
-            if (userRole === 'patient' && appt.patient_id !== userId) {
-                return res.status(403).json({ error: 'Not authorized' });
-            }
-            if (userRole === 'doctor' && appt.doctor_id !== userId) {
-                return res.status(403).json({ error: 'Not authorized' });
-            }
-
-            // Update status
-            const result = await pool.query(
-                `UPDATE appointments 
-                 SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP
-                 WHERE id = $3
-                 RETURNING *`,
-                [status, notes, id]
-            );
-
-            res.json(result.rows[0]);
-
-        } catch (error) {
-            console.error('Error updating appointment:', error);
-            res.status(500).json({ error: 'Failed to update appointment' });
+        if (appointment.rows.length === 0) {
+            return res.status(404).json({ error: 'Appointment not found' });
         }
+
+        const appt = appointment.rows[0];
+
+        // Check permissions
+        if (userRole === 'patient' && appt.patient_id !== userId) {
+            return res.status(403).json({ error: 'Not authorized' });
+        }
+        if (userRole === 'doctor' && appt.doctor_id !== userId) {
+            return res.status(403).json({ error: 'Not authorized' });
+        }
+
+        // Update both status and payment_status if needed
+        let updateQuery = `UPDATE appointments SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP`;
+        const params = [status, notes, id];
+        
+        // If status is confirmed, also update payment_status
+        if (status === 'confirmed') {
+            updateQuery = `UPDATE appointments SET status = $1, payment_status = 'paid', notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`;
+        } else if (status === 'cancelled') {
+            updateQuery = `UPDATE appointments SET status = $1, payment_status = 'failed', notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`;
+        } else {
+            updateQuery = `UPDATE appointments SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`;
+        }
+        
+        const result = await pool.query(updateQuery, params);
+
+        console.log('Appointment updated:', result.rows[0]);
+
+        // Send notification
+        if (global.sendNotification) {
+            const otherUserId = userRole === 'doctor' ? appt.patient_id : appt.doctor_id;
+            await global.sendNotification(
+                otherUserId,
+                'appointment_status_changed',
+                `Appointment ${status}`,
+                `Your appointment has been ${status}`,
+                { appointment_id: id, status }
+            );
+        }
+
+        res.json(result.rows[0]);
+
+    } catch (error) {
+        console.error('Error updating appointment:', error);
+        res.status(500).json({ error: 'Failed to update appointment' });
     }
+}
 
     // Get appointment details
     async getAppointmentById(req, res) {
@@ -241,7 +436,6 @@ class AppointmentController {
 
             const appointment = result.rows[0];
 
-            // Check permission
             if (userRole !== 'admin' && appointment.patient_id !== userId && appointment.doctor_id !== userId) {
                 return res.status(403).json({ error: 'Not authorized' });
             }
@@ -254,86 +448,6 @@ class AppointmentController {
         }
     }
 
-    // Add this method to the AppointmentController class
-async createAppointment(req, res) {
-    const client = await pool.connect();
-    try {
-        const { doctor_id, plan_id, appointment_date, appointment_time, reason, amount } = req.body;
-        const patient_id = req.user.id;
-
-        console.log('Creating appointment:', { doctor_id, plan_id, appointment_date, appointment_time, patient_id });
-
-        if (!doctor_id || !plan_id || !appointment_date || !appointment_time) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-
-        await client.query('BEGIN');
-
-        // Check if doctor exists
-        const doctorCheck = await client.query(
-            'SELECT id, name, email FROM users WHERE id = $1 AND role = $2',
-            [doctor_id, 'doctor']
-        );
-        if (doctorCheck.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Doctor not found' });
-        }
-
-        // Check if plan exists
-        const planCheck = await client.query(
-            'SELECT * FROM plans WHERE id = $1 AND is_active = true',
-            [plan_id]
-        );
-        if (planCheck.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Plan not found' });
-        }
-
-        // Check if slot is available
-        const slotCheck = await client.query(
-            `SELECT id FROM appointments 
-             WHERE doctor_id = $1 
-             AND appointment_date = $2 
-             AND appointment_time = $3 
-             AND status NOT IN ('cancelled', 'rejected')`,
-            [doctor_id, appointment_date, appointment_time]
-        );
-
-        if (slotCheck.rows.length > 0) {
-            await client.query('ROLLBACK');
-            return res.status(409).json({ error: 'Time slot already booked' });
-        }
-
-        // Create appointment
-        const result = await client.query(
-            `INSERT INTO appointments 
-             (patient_id, doctor_id, plan_id, appointment_date, appointment_time, reason, status, payment_status)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending', 'pending')
-             RETURNING *`,
-            [patient_id, doctor_id, plan_id, appointment_date, appointment_time, reason]
-        );
-
-        const appointment = result.rows[0];
-
-        await client.query('COMMIT');
-
-        console.log('Appointment created:', appointment);
-
-        res.status(201).json({
-            ...appointment,
-            doctor: doctorCheck.rows[0],
-            plan: planCheck.rows[0]
-        });
-
-    } catch (error) {
-        await client.query('ROLLBACK');
-        console.error('Error creating appointment:', error);
-        res.status(500).json({ error: 'Failed to create appointment', details: error.message });
-    } finally {
-        client.release();
-    }
-}
-
     // Get available time slots for a doctor
     async getAvailableSlots(req, res) {
         try {
@@ -343,13 +457,11 @@ async createAppointment(req, res) {
                 return res.status(400).json({ error: 'Doctor ID and date required' });
             }
 
-            // Get all time slots for the day
             const allSlots = [
                 '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
                 '13:00', '13:30', '14:00', '14:30', '15:00', '15:30', '16:00'
             ];
 
-            // Get booked slots
             const bookedSlots = await pool.query(
                 `SELECT appointment_time 
                  FROM appointments 
@@ -387,7 +499,6 @@ async createAppointment(req, res) {
                 [appointment_id, sender_id, message]
             );
 
-            // Get sender info
             const sender = await pool.query(
                 'SELECT id, name, role FROM users WHERE id = $1',
                 [sender_id]
@@ -410,7 +521,6 @@ async createAppointment(req, res) {
             const { appointmentId } = req.params;
             const userId = req.user.id;
 
-            // Verify access
             const appointment = await pool.query(
                 `SELECT patient_id, doctor_id FROM appointments WHERE id = $1`,
                 [appointmentId]
@@ -442,5 +552,7 @@ async createAppointment(req, res) {
         }
     }
 }
+
+
 
 module.exports = new AppointmentController();

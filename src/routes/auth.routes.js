@@ -10,7 +10,12 @@ const {
   uploadProfilePicture,
   changePassword,
   deleteAccount,
-  getUserStats
+  getUserStats,
+  testGoogleToken,
+  verifyGoogleToken,
+  checkPasswordStatus,
+  getUserPlan,        // Add this
+  getAssignedDoctor   // Add this
 } = require('../controllers/auth.controller');
 const authMiddleware = require('../middleware/auth.middleware');
 const upload = require('../config/upload.config');
@@ -24,6 +29,10 @@ router.post('/login', login);
 router.post('/resend-verification', resendVerification);
 router.post('/test-email', testEmail);
 
+// Google OAuth routes
+router.post('/test-google', testGoogleToken);
+router.post('/google/verify', verifyGoogleToken);
+
 // Protected routes (require authentication)
 router.get('/profile', authMiddleware, getProfile);
 router.put('/profile', authMiddleware, updateProfile);
@@ -31,5 +40,13 @@ router.post('/profile/picture', authMiddleware, upload.single('profile_picture')
 router.post('/change-password', authMiddleware, changePassword);
 router.delete('/account', authMiddleware, deleteAccount);
 router.get('/stats', authMiddleware, getUserStats);
+
+router.get('/password-status', authMiddleware, checkPasswordStatus);
+
+
+
+// Add these routes
+router.get('/user-plan', authMiddleware, getUserPlan);
+router.get('/assigned-doctor', authMiddleware, getAssignedDoctor);
 
 module.exports = router;

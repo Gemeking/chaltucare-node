@@ -55,6 +55,7 @@ const chatRoutes = require('./src/routes/chat.routes');
 const appointmentRoutes = require('./src/routes/appointment.routes');
 const paymentRoutes = require('./src/routes/payment.routes');
 const userRoutes = require('./src/routes/user.routes');
+const notificationRoutes = require('./src/routes/notification.routes');
 
 // ============================================
 // REGISTER ROUTES
@@ -64,6 +65,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/appointments', appointmentRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // ============================================
 // SOCKET.IO CONNECTION HANDLING
@@ -85,6 +87,35 @@ io.use((socket, next) => {
         next(new Error('Invalid token'));
     }
 });
+
+// Notification helper function (defined once)
+const sendNotification = async (userId, type, title, message, data = null) => {
+    try {
+        const pool = require('./src/config/db');
+        
+        const result = await pool.query(
+            `INSERT INTO notifications (user_id, type, title, message, data, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             RETURNING *`,
+            [userId, type, title, message, data ? JSON.stringify(data) : null]
+        );
+        
+        const notification = result.rows[0];
+        
+        const userSocketId = connectedUsers.get(parseInt(userId));
+        if (userSocketId) {
+            io.to(userSocketId).emit('new-notification', notification);
+            console.log(`📢 Notification sent to user ${userId}: ${title}`);
+        }
+        
+        return notification;
+    } catch (error) {
+        console.error('Error sending notification:', error);
+        return null;
+    }
+};
+
+global.sendNotification = sendNotification;
 
 io.on('connection', (socket) => {
     console.log(`✅ User connected: ${socket.userId} (${socket.userRole})`);
@@ -108,6 +139,8 @@ io.on('connection', (socket) => {
         try {
             const { receiverId, message, file } = data;
             const senderId = socket.userId;
+            
+            console.log(`📤 Sending message from ${senderId} to ${receiverId}: ${message || '📎 File'}`);
             
             const pool = require('./src/config/db');
             
@@ -140,11 +173,30 @@ io.on('connection', (socket) => {
             const receiverSocketId = connectedUsers.get(parseInt(receiverId));
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('new-message', messageData);
+                console.log(`✅ Message sent to user ${receiverId}`);
+                
+                // Send notification for new message
+                await sendNotification(
+                    parseInt(receiverId),
+                    'new_message',
+                    'New Message',
+                    `${senderResult.rows[0].name} sent you a message: ${message?.substring(0, 50) || '📎 File'}`,
+                    { 
+                        message_id: newMessage.id, 
+                        sender_id: senderId, 
+                        sender_name: senderResult.rows[0].name,
+                        chat_room: `conversation:${user1}:${user2}`
+                    }
+                );
             }
+            
             io.to(socket.id).emit('message-sent', messageData);
             
+            const room = getConversationRoom(senderId, receiverId);
+            io.to(room).emit('conversation-message', messageData);
+            
         } catch (error) {
-            console.error('Error sending message:', error);
+            console.error('❌ Error sending message:', error);
             socket.emit('message-error', { error: 'Failed to send message' });
         }
     });
@@ -359,7 +411,6 @@ app.get('/api/db-test', async (req, res) => {
     }
 });
 
-// Test endpoint for plans
 app.get('/api/test-plans', async (req, res) => {
     try {
         const pool = require('./src/config/db');
@@ -381,7 +432,7 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================
-// START SERVER - SINGLE LISTEN
+// START SERVER
 // ============================================
 
 server.listen(PORT, '0.0.0.0', () => {

@@ -8,8 +8,9 @@ const PaymentController = {
                 return res.status(400).json({ error: 'No file uploaded' });
             }
             
-            // Store in payments folder
             const fileUrl = `/uploads/payments/${req.file.filename}`;
+            
+            console.log('Screenshot uploaded:', fileUrl);
             
             res.json({
                 success: true,
@@ -29,7 +30,7 @@ const PaymentController = {
     },
 
     // Create payment intent
-    createPaymentIntent: async (req, res) => {
+    async createPaymentIntent(req, res) {
         try {
             const { appointment_id, amount, plan_name } = req.body;
             const user_id = req.user.id;
@@ -40,9 +41,9 @@ const PaymentController = {
                 return res.status(400).json({ error: 'Missing required fields: appointment_id and amount' });
             }
 
-            // Check if appointment exists
+            // Check if appointment exists and belongs to user
             const appointmentCheck = await pool.query(
-                'SELECT id FROM appointments WHERE id = $1 AND patient_id = $2',
+                'SELECT * FROM appointments WHERE id = $1 AND patient_id = $2',
                 [appointment_id, user_id]
             );
 
@@ -53,10 +54,10 @@ const PaymentController = {
             // Generate unique payment ID
             const paymentId = 'PAY-' + Date.now() + '-' + Math.random().toString(36).substr(2, 8);
             
-            // Insert payment record - only insert columns that exist
+            // Insert payment record - only use columns that exist
             const result = await pool.query(
-                `INSERT INTO payments (appointment_id, user_id, amount, status, payment_id)
-                 VALUES ($1, $2, $3, 'pending', $4)
+                `INSERT INTO payments (appointment_id, user_id, amount, status, payment_id, payment_method, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'pending', $4, 'bank_transfer', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                  RETURNING *`,
                 [appointment_id, user_id, amount, paymentId]
             );
@@ -77,70 +78,218 @@ const PaymentController = {
         }
     },
 
-    // Confirm payment with screenshot
-    confirmPayment: async (req, res) => {
-        const client = await pool.connect();
-        try {
-            const { payment_id, appointment_id, screenshot_url } = req.body;
-            const user_id = req.user.id;
+    // Submit payment with screenshot
+    // Submit payment with screenshot
+// Submit payment with screenshot
+async submitPayment(req, res) {
+    const client = await pool.connect();
+    try {
+        const { payment_id, appointment_id, screenshot_url } = req.body;
+        const user_id = req.user.id;
 
-            console.log('Confirming payment:', { payment_id, appointment_id, user_id, screenshot_url });
+        console.log('=== SUBMIT PAYMENT CALLED ===');
+        console.log('Request body:', JSON.stringify(req.body, null, 2));
+        console.log('User ID:', user_id);
 
-            if (!payment_id || !appointment_id) {
-                return res.status(400).json({ error: 'Missing payment_id or appointment_id' });
-            }
+        // Validate required fields
+        if (!payment_id) {
+            return res.status(400).json({ error: 'Payment ID is required' });
+        }
+        if (!appointment_id) {
+            return res.status(400).json({ error: 'Appointment ID is required' });
+        }
+        if (!screenshot_url) {
+            return res.status(400).json({ error: 'Screenshot URL is required' });
+        }
 
-            await client.query('BEGIN');
+        await client.query('BEGIN');
 
-            // Update payment status - only update columns that exist
+        // Check if appointment exists and belongs to user
+        const appointmentCheck = await client.query(
+            'SELECT * FROM appointments WHERE id = $1 AND patient_id = $2',
+            [appointment_id, user_id]
+        );
+
+        if (appointmentCheck.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ error: 'Appointment not found' });
+        }
+
+        // Update payment with screenshot - FIXED QUERY
+        // Update payment with screenshot
+const updateResult = await client.query(
+    `UPDATE payments 
+     SET status = 'pending', 
+         notes = $1,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE payment_id = $2
+     RETURNING *`,
+    [screenshot_url, payment_id]
+);
+
+        console.log('Payment update result:', updateResult.rows);
+
+        // Update appointment status
+        const appointmentResult = await client.query(
+            `UPDATE appointments 
+             SET payment_status = 'pending', 
+                 status = 'pending',
+                 updated_at = CURRENT_TIMESTAMP,
+                 notes = COALESCE(notes, '') || '\nPayment Screenshot: ' || $1
+             WHERE id = $2 AND patient_id = $3
+             RETURNING *`,
+            [screenshot_url, appointment_id, user_id]
+        );
+
+        console.log('Appointment update result:', appointmentResult.rows);
+
+        await client.query('COMMIT');
+
+        console.log('Payment submitted successfully');
+
+        res.json({
+            success: true,
+            message: 'Payment submitted successfully. Waiting for doctor verification.',
+            payment: updateResult.rows[0],
+            appointment: appointmentResult.rows[0]
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error submitting payment:', error);
+        res.status(500).json({ error: 'Failed to submit payment', details: error.message });
+    } finally {
+        client.release();
+    }
+},
+    // Doctor verifies payment
+    // Doctor verifies payment
+// Doctor verifies payment
+async verifyPayment(req, res) {
+    const client = await pool.connect();
+    try {
+        const { payment_id, appointment_id, approved } = req.body;
+        
+        // Check if user is doctor
+        if (req.user.role !== 'doctor') {
+            return res.status(403).json({ error: 'Only doctors can verify payments' });
+        }
+
+        console.log('Verifying payment:', { payment_id, appointment_id, approved });
+
+        if (!payment_id || !appointment_id) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        await client.query('BEGIN');
+
+        if (approved) {
+            // Update payment status
             const paymentResult = await client.query(
                 `UPDATE payments 
                  SET status = 'completed', 
-                     updated_at = CURRENT_TIMESTAMP,
-                     transaction_id = $3
-                 WHERE payment_id = $1 AND user_id = $2
+                     verified_by = $3,
+                     verified_at = CURRENT_TIMESTAMP,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE payment_id = $1
                  RETURNING *`,
-                [payment_id, user_id, 'TXN-' + Date.now()]
+                [payment_id, req.user.id]
             );
 
-            if (paymentResult.rows.length === 0) {
-                await client.query('ROLLBACK');
-                return res.status(404).json({ error: 'Payment not found' });
-            }
-
-            // Update appointment payment status
+            // Update appointment - BOTH status and payment_status
             const appointmentResult = await client.query(
                 `UPDATE appointments 
-                 SET payment_status = 'paid', 
-                     status = 'confirmed', 
-                     updated_at = CURRENT_TIMESTAMP,
-                     notes = COALESCE(notes, '') || '\nPayment Screenshot: ' || $3
-                 WHERE id = $1 AND patient_id = $2
+                 SET status = 'confirmed', 
+                     payment_status = 'paid', 
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $1
                  RETURNING *`,
-                [appointment_id, user_id, screenshot_url || 'No screenshot']
+                [appointment_id]
             );
 
             await client.query('COMMIT');
 
-            console.log('Payment confirmed successfully');
+            console.log('Payment verified and appointment confirmed:', appointmentResult.rows[0]);
+
+            // Send notification to patient
+            if (global.sendNotification) {
+                // Get patient info
+                const patientInfo = await client.query(
+                    `SELECT name, email FROM users WHERE id = $1`,
+                    [appointmentResult.rows[0].patient_id]
+                );
+                
+                await global.sendNotification(
+                    appointmentResult.rows[0].patient_id,
+                    'payment_verified',
+                    'Payment Verified!',
+                    `Your payment has been verified. Your appointment is now confirmed.`,
+                    { appointment_id, status: 'confirmed' }
+                );
+            }
 
             res.json({
                 success: true,
+                message: 'Payment verified and appointment confirmed. Patient can now chat.',
                 payment: paymentResult.rows[0],
                 appointment: appointmentResult.rows[0]
             });
+        } else {
+            // Reject payment
+            const paymentResult = await client.query(
+                `UPDATE payments 
+                 SET status = 'rejected', 
+                     verified_by = $3,
+                     verified_at = CURRENT_TIMESTAMP,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE payment_id = $1
+                 RETURNING *`,
+                [payment_id, req.user.id]
+            );
 
-        } catch (error) {
-            await client.query('ROLLBACK');
-            console.error('Error confirming payment:', error);
-            res.status(500).json({ error: 'Failed to confirm payment', details: error.message });
-        } finally {
-            client.release();
+            // Update appointment - set to cancelled
+            const appointmentResult = await client.query(
+                `UPDATE appointments 
+                 SET status = 'cancelled', 
+                     payment_status = 'failed', 
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $1
+                 RETURNING *`,
+                [appointment_id]
+            );
+
+            await client.query('COMMIT');
+
+            // Send notification to patient
+            if (global.sendNotification) {
+                await global.sendNotification(
+                    appointmentResult.rows[0].patient_id,
+                    'payment_rejected',
+                    'Payment Rejected',
+                    `Your payment was rejected. Please contact support or try again.`,
+                    { appointment_id, status: 'cancelled' }
+                );
+            }
+
+            res.json({
+                success: true,
+                message: 'Payment rejected. Appointment cancelled.',
+                payment: paymentResult.rows[0],
+                appointment: appointmentResult.rows[0]
+            });
         }
-    },
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Error verifying payment:', error);
+        res.status(500).json({ error: 'Failed to verify payment', details: error.message });
+    } finally {
+        client.release();
+    }
+},
 
     // Get payment status
-    getPaymentStatus: async (req, res) => {
+    async getPaymentStatus(req, res) {
         try {
             const { paymentId } = req.params;
             const user_id = req.user.id;
@@ -164,7 +313,7 @@ const PaymentController = {
     },
 
     // Get user's payment history
-    getUserPayments: async (req, res) => {
+    async getUserPayments(req, res) {
         try {
             const user_id = req.user.id;
 
