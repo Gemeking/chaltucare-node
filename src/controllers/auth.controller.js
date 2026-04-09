@@ -8,11 +8,15 @@ const { OAuth2Client } = require('google-auth-library');
 // Register user
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, email, password } = req.body;
 
-    if (!name || !email || !password || !role) {
-      return res.status(400).json({ message: 'All fields are required' });
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'Name, email, and password are required' });
     }
+
+    // Only patients (role 'user') can self-register.
+    // Doctors and admins must be created by an admin via a separate endpoint.
+    const role = 'user';
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const token = crypto.randomBytes(32).toString('hex');
@@ -23,7 +27,8 @@ exports.register = async (req, res) => {
       [name, email, hashedPassword, role, token]
     );
 
-    const verifyLink = `http://localhost:5000/api/auth/verify/${token}`;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const verifyLink = `${frontendUrl}/verify-email/${token}`;
 
     await transporter.sendMail({
       to: email,
@@ -138,7 +143,8 @@ exports.resendVerification = async (req, res) => {
       [token, email]
     );
 
-    const verifyLink = `http://localhost:5000/api/auth/verify/${token}`;
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const verifyLink = `${frontendUrl}/verify-email/${token}`;
 
     await transporter.sendMail({
       to: email,
@@ -724,6 +730,75 @@ exports.getUserPlan = async (req, res) => {
   } catch (error) {
     console.error('Error getting user plan:', error);
     res.status(500).json({ error: error.message });
+  }
+};
+
+// Admin: create a doctor or admin account
+exports.createStaffUser = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { name, email, password, role } = req.body;
+
+    if (!name || !email || !password || !role) {
+      return res.status(400).json({ message: 'Name, email, password, and role are required' });
+    }
+
+    if (!['doctor', 'admin'].includes(role)) {
+      return res.status(400).json({ error: 'Role must be doctor or admin' });
+    }
+
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Email already in use' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, is_verified, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       RETURNING id, name, email, role, is_verified, created_at`,
+      [name, email, hashedPassword, role]
+    );
+
+    res.status(201).json({ message: 'Staff account created successfully', user: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// Admin: update any user's role
+exports.updateUserRole = async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!['user', 'doctor', 'admin'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET role = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2
+       RETURNING id, name, email, role`,
+      [role, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'Role updated', user: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 };
 

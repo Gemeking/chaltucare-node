@@ -14,8 +14,10 @@ const {
   testGoogleToken,
   verifyGoogleToken,
   checkPasswordStatus,
-  getUserPlan,        // Add this
-  getAssignedDoctor   // Add this
+  getUserPlan,
+  getAssignedDoctor,
+  createStaffUser,
+  updateUserRole
 } = require('../controllers/auth.controller');
 const authMiddleware = require('../middleware/auth.middleware');
 const upload = require('../config/upload.config');
@@ -45,8 +47,11 @@ router.get('/password-status', authMiddleware, checkPasswordStatus);
 
 
 
-// Add these routes
 router.get('/user-plan', authMiddleware, getUserPlan);
 router.get('/assigned-doctor', authMiddleware, getAssignedDoctor);
+
+// Admin-only routes
+router.post('/admin/create-staff', authMiddleware, createStaffUser);
+router.patch('/admin/users/:id/role', authMiddleware, updateUserRole);
 
 module.exports = router;

@@ -177,6 +177,11 @@ class AppointmentController {
                 return res.status(404).json({ error: 'Doctor not found' });
             }
 
+            const patientCheck = await client.query(
+                'SELECT id, name, email FROM users WHERE id = $1',
+                [patient_id]
+            );
+
             const planCheck = await client.query(
                 'SELECT * FROM plans WHERE id = $1 AND is_active = true',
                 [plan_id]
@@ -219,8 +224,8 @@ class AppointmentController {
                     doctor_id,
                     'new_appointment',
                     'New Appointment Request',
-                    `New appointment request from ${doctorCheck.rows[0].name} on ${appointment_date} at ${appointment_time}`,
-                    { appointment_id: appointment.id, patient_name: doctorCheck.rows[0].name, appointment_date, appointment_time }
+                    `New appointment request from ${patientCheck.rows[0].name} on ${appointment_date} at ${appointment_time}`,
+                    { appointment_id: appointment.id, patient_name: patientCheck.rows[0].name, appointment_date, appointment_time }
                 );
                 
                 // Notify patient
@@ -365,19 +370,16 @@ async updateAppointmentStatus(req, res) {
 
         const appt = appointment.rows[0];
 
-        // Check permissions
-        if (userRole === 'patient' && appt.patient_id !== userId) {
+        // Check permissions ('user' is the patient role)
+        if (userRole === 'user' && appt.patient_id !== userId) {
             return res.status(403).json({ error: 'Not authorized' });
         }
         if (userRole === 'doctor' && appt.doctor_id !== userId) {
             return res.status(403).json({ error: 'Not authorized' });
         }
 
-        // Update both status and payment_status if needed
-        let updateQuery = `UPDATE appointments SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP`;
-        const params = [status, notes, id];
-        
-        // If status is confirmed, also update payment_status
+        // Build update query based on new status
+        let updateQuery;
         if (status === 'confirmed') {
             updateQuery = `UPDATE appointments SET status = $1, payment_status = 'paid', notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`;
         } else if (status === 'cancelled') {
@@ -385,6 +387,7 @@ async updateAppointmentStatus(req, res) {
         } else {
             updateQuery = `UPDATE appointments SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3 RETURNING *`;
         }
+        const params = [status, notes, id];
         
         const result = await pool.query(updateQuery, params);
 
@@ -479,6 +482,42 @@ async updateAppointmentStatus(req, res) {
         } catch (error) {
             console.error('Error fetching available slots:', error);
             res.status(500).json({ error: 'Failed to fetch available slots' });
+        }
+    }
+
+    // Admin: get all appointments across all doctors and patients
+    async getAllAppointments(req, res) {
+        try {
+            if (req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Admin access required' });
+            }
+
+            const { status, doctor_id, patient_id } = req.query;
+            let query = `
+                SELECT a.*,
+                       pt.name as patient_name, pt.email as patient_email,
+                       dr.name as doctor_name, dr.email as doctor_email,
+                       pl.name as plan_name, pl.price as plan_price
+                FROM appointments a
+                JOIN users pt ON pt.id = a.patient_id
+                JOIN users dr ON dr.id = a.doctor_id
+                JOIN plans pl ON pl.id = a.plan_id
+                WHERE 1=1
+            `;
+            const params = [];
+            let idx = 1;
+
+            if (status) { query += ` AND a.status = $${idx++}`; params.push(status); }
+            if (doctor_id) { query += ` AND a.doctor_id = $${idx++}`; params.push(doctor_id); }
+            if (patient_id) { query += ` AND a.patient_id = $${idx++}`; params.push(patient_id); }
+
+            query += ` ORDER BY a.appointment_date DESC, a.appointment_time DESC`;
+
+            const result = await pool.query(query, params);
+            res.json(result.rows);
+        } catch (error) {
+            console.error('Error fetching all appointments:', error);
+            res.status(500).json({ error: 'Failed to fetch appointments' });
         }
     }
 

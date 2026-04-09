@@ -11,6 +11,7 @@ router.use(authMiddleware);
 router.post('/create-payment-intent', paymentController.createPaymentIntent.bind(paymentController));
 router.post('/submit', paymentController.submitPayment.bind(paymentController));
 router.post('/verify', paymentController.verifyPayment.bind(paymentController));
+router.get('/all', paymentController.getAllPayments.bind(paymentController));       // admin only (enforced in controller)
 router.get('/status/:paymentId', paymentController.getPaymentStatus.bind(paymentController));
 router.get('/history', paymentController.getUserPayments.bind(paymentController));
 

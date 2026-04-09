@@ -8,9 +8,15 @@ const jwt = require('jsonwebtoken');
 
 const app = express();
 const server = http.createServer(app);
+// Allow the deployed frontend URL + localhost in development
+const allowedOrigins = [
+    'http://localhost:3000',
+    process.env.FRONTEND_URL,
+].filter(Boolean);
+
 const io = socketIo(server, {
     cors: {
-        origin: "*",
+        origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
     }
@@ -36,7 +42,7 @@ function getLocalIp() {
 // MIDDLEWARE
 // ============================================
 app.use(cors({
-    origin: "*",
+    origin: allowedOrigins,
     credentials: true
 }));
 app.use(express.json());
@@ -354,51 +360,6 @@ app.get('/health', (req, res) => {
 
 app.get('/', (req, res) => {
     res.json({ name: 'ChaltuCare API', version: '1.0.0', endpoints: { health: '/health', auth: '/api/auth', chat: '/api/chat', users: '/api/users', appointments: '/api/appointments', payments: '/api/payments' } });
-});
-
-app.get('/api/users', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        let currentUserId = null;
-        
-        if (authHeader && authHeader.startsWith('Bearer ')) {
-            const token = authHeader.split(' ')[1];
-            try {
-                const decoded = jwt.verify(token, process.env.JWT_SECRET);
-                currentUserId = decoded.id;
-            } catch (err) {}
-        }
-        
-        const pool = require('./src/config/db');
-        let query, params;
-        
-        if (currentUserId) {
-            query = `SELECT id, name, email, role, is_verified, created_at FROM users WHERE id != $1 ORDER BY name`;
-            params = [currentUserId];
-        } else {
-            query = `SELECT id, name, email, role, is_verified, created_at FROM users ORDER BY name`;
-            params = [];
-        }
-        
-        const result = await pool.query(query, params);
-        const usersWithStatus = result.rows.map(user => ({ ...user, isOnline: connectedUsers.has(user.id) }));
-        res.json(usersWithStatus);
-    } catch (error) {
-        console.error('Error fetching users:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.get('/api/users/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const pool = require('./src/config/db');
-        const result = await pool.query(`SELECT id, name, email, role, is_verified, created_at FROM users WHERE id = $1`, [id]);
-        if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-        res.json(result.rows[0]);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
 });
 
 app.get('/api/db-test', async (req, res) => {

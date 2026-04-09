@@ -186,9 +186,9 @@ async verifyPayment(req, res) {
         if (approved) {
             // Update payment status
             const paymentResult = await client.query(
-                `UPDATE payments 
-                 SET status = 'completed', 
-                     verified_by = $3,
+                `UPDATE payments
+                 SET status = 'completed',
+                     verified_by = $2,
                      verified_at = CURRENT_TIMESTAMP,
                      updated_at = CURRENT_TIMESTAMP
                  WHERE payment_id = $1
@@ -237,9 +237,9 @@ async verifyPayment(req, res) {
         } else {
             // Reject payment
             const paymentResult = await client.query(
-                `UPDATE payments 
-                 SET status = 'rejected', 
-                     verified_by = $3,
+                `UPDATE payments
+                 SET status = 'rejected',
+                     verified_by = $2,
                      verified_at = CURRENT_TIMESTAMP,
                      updated_at = CURRENT_TIMESTAMP
                  WHERE payment_id = $1
@@ -309,6 +309,39 @@ async verifyPayment(req, res) {
         } catch (error) {
             console.error('Error fetching payment:', error);
             res.status(500).json({ error: 'Failed to fetch payment status' });
+        }
+    },
+
+    // Admin: get all payments
+    async getAllPayments(req, res) {
+        try {
+            if (req.user.role !== 'admin') {
+                return res.status(403).json({ error: 'Admin access required' });
+            }
+
+            const { status } = req.query;
+            let query = `
+                SELECT p.*,
+                       a.appointment_date, a.appointment_time,
+                       pt.name as patient_name, pt.email as patient_email,
+                       dr.name as doctor_name,
+                       pl.name as plan_name
+                FROM payments p
+                JOIN appointments a ON a.id = p.appointment_id
+                JOIN users pt ON pt.id = p.user_id
+                JOIN users dr ON dr.id = a.doctor_id
+                JOIN plans pl ON pl.id = a.plan_id
+                WHERE 1=1
+            `;
+            const params = [];
+            if (status) { query += ` AND p.status = $1`; params.push(status); }
+            query += ` ORDER BY p.created_at DESC`;
+
+            const result = await pool.query(query, params);
+            res.json(result.rows);
+        } catch (error) {
+            console.error('Error fetching all payments:', error);
+            res.status(500).json({ error: 'Failed to fetch payments' });
         }
     },
 
