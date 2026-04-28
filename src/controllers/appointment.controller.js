@@ -260,15 +260,16 @@ class AppointmentController {
             const { status } = req.query;
 
             let query = `
-                SELECT a.*, 
-                       u.name as doctor_name, 
+                SELECT a.*,
+                       u.name as doctor_name,
                        u.email as doctor_email,
                        p.name as plan_name,
                        p.price as plan_price,
-                       p.duration_minutes
+                       p.duration_minutes,
+                       p.features as plan_features
                 FROM appointments a
-                JOIN users u ON u.id = a.doctor_id
-                JOIN plans p ON p.id = a.plan_id
+                LEFT JOIN users u ON u.id = a.doctor_id
+                LEFT JOIN plans p ON p.id = a.plan_id
                 WHERE a.patient_id = $1
             `;
             const params = [userId];
@@ -296,18 +297,18 @@ class AppointmentController {
             const { status, date } = req.query;
 
             let query = `
-                SELECT a.*, 
-                       u.name as patient_name, 
+                SELECT a.*,
+                       u.name  as patient_name,
                        u.email as patient_email,
-                       p.name as plan_name,
+                       p.name  as plan_name,
                        p.price as plan_price,
                        pay.payment_id,
-                       pay.status as payment_status,
-                       pay.notes as payment_notes,
-                       pay.created_at as payment_date
+                       pay.status       as pay_status,
+                       pay.notes        as payment_notes,
+                       pay.created_at   as payment_date
                 FROM appointments a
-                JOIN users u ON u.id = a.patient_id
-                JOIN plans p ON p.id = a.plan_id
+                LEFT JOIN users u    ON u.id = a.patient_id
+                LEFT JOIN plans p    ON p.id = a.plan_id
                 LEFT JOIN payments pay ON pay.appointment_id = a.id
                 WHERE a.doctor_id = $1
             `;
@@ -330,12 +331,14 @@ class AppointmentController {
             const result = await pool.query(query, params);
             
             const appointments = result.rows.map(apt => {
+                // payment_notes = payments.notes = raw screenshot URL stored by submitPayment
+                // appointments.notes also has 'Payment Screenshot: <url>' as fallback
                 let screenshotUrl = null;
-                if (apt.payment_notes && apt.payment_notes.includes('Payment Screenshot:')) {
-                    const match = apt.payment_notes.match(/Payment Screenshot: (\/uploads\/payments\/[^\s]+)/);
-                    if (match) {
-                        screenshotUrl = match[1];
-                    }
+                if (apt.payment_notes && apt.payment_notes.startsWith('/uploads/')) {
+                    screenshotUrl = apt.payment_notes;
+                } else if (apt.notes) {
+                    const match = apt.notes.match(/Payment Screenshot: (\/uploads\/payments\/[^\s]+)/);
+                    if (match) screenshotUrl = match[1];
                 }
                 return {
                     ...apt,

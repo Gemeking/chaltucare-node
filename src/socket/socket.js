@@ -200,6 +200,76 @@ class SocketManager {
                 }
             });
             
+            // ── WebRTC Signaling ──────────────────────────────────
+
+            // Caller initiates a call
+            socket.on('call-user', (data) => {
+                const { receiverId, callType, callerName, signal } = data;
+                const receiverSocket = this.connectedUsers.get(parseInt(receiverId));
+                if (receiverSocket) {
+                    const callId = `call-${socket.userId}-${receiverId}-${Date.now()}`;
+                    this.io.to(receiverSocket).emit('incoming-call', {
+                        callId,
+                        callerId:   socket.userId,
+                        callerName: callerName || 'Unknown',
+                        callType:   callType || 'video',
+                        signal,
+                    });
+                    console.log(`Call from ${socket.userId} to ${receiverId}`);
+                }
+            });
+
+            // Relay SDP answer or ICE candidate to the target peer
+            socket.on('send-signal', (data) => {
+                const { to, signal } = data;
+                const targetSocket = this.connectedUsers.get(parseInt(to));
+                if (targetSocket) {
+                    this.io.to(targetSocket).emit('receive-signal', {
+                        from: socket.userId,
+                        signal,
+                    });
+                }
+            });
+
+            // Receiver accepted the call — notify caller
+            socket.on('accept-call', (data) => {
+                const { callId } = data;
+                // callId format: call-{callerId}-{receiverId}-{ts}
+                const parts = String(callId).split('-');
+                const callerId = parseInt(parts[1]);
+                const callerSocket = this.connectedUsers.get(callerId);
+                if (callerSocket) {
+                    this.io.to(callerSocket).emit('call-accepted', { callId });
+                }
+            });
+
+            // Receiver rejected the call — notify caller
+            socket.on('reject-call', (data) => {
+                const { callId } = data;
+                const parts = String(callId).split('-');
+                const callerId = parseInt(parts[1]);
+                const callerSocket = this.connectedUsers.get(callerId);
+                if (callerSocket) {
+                    this.io.to(callerSocket).emit('call-rejected', { callId });
+                }
+            });
+
+            // Either party ended the call — notify the other
+            socket.on('end-call', (data) => {
+                const { callId, to } = data;
+                let otherId = to ? parseInt(to) : null;
+                if (!otherId && callId) {
+                    const parts = String(callId).split('-');
+                    const callerId   = parseInt(parts[1]);
+                    const receiverId = parseInt(parts[2]);
+                    otherId = socket.userId === callerId ? receiverId : callerId;
+                }
+                if (otherId) {
+                    const otherSocket = this.connectedUsers.get(otherId);
+                    if (otherSocket) this.io.to(otherSocket).emit('call-ended', { callId });
+                }
+            });
+
             // Handle disconnect
             socket.on('disconnect', () => {
                 console.log(`User disconnected: ${socket.userId}`);

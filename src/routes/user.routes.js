@@ -23,6 +23,27 @@ router.get('/', authMiddleware, async (req, res) => {
     }
 });
 
+// Get patients assigned to the current doctor (have any appointment with this doctor)
+router.get('/my-patients', authMiddleware, async (req, res) => {
+    try {
+        if (req.user.role !== 'doctor' && req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Doctors only' });
+        }
+        const query = req.user.role === 'admin'
+            ? `SELECT id, name, email, role FROM users WHERE role = 'user' ORDER BY name`
+            : `SELECT DISTINCT u.id, u.name, u.email, u.role
+               FROM users u
+               JOIN appointments a ON a.patient_id = u.id
+               WHERE a.doctor_id = $1
+               ORDER BY u.name`;
+        const params = req.user.role === 'admin' ? [] : [req.user.id];
+        const result = await pool.query(query, params);
+        res.json(result.rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Get all doctors
 router.get('/role/doctors', authMiddleware, async (req, res) => {
     try {

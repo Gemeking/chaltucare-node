@@ -14,6 +14,16 @@ exports.register = async (req, res) => {
       return res.status(400).json({ message: 'Name, email, and password are required' });
     }
 
+    // Check if email already exists
+    const existing = await pool.query('SELECT id, is_verified FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      if (existing.rows[0].is_verified) {
+        return res.status(409).json({ message: 'An account with this email already exists. Please log in.' });
+      } else {
+        return res.status(409).json({ message: 'Email already registered but not verified. Use "Resend Verification" to get a new link.' });
+      }
+    }
+
     // Only patients (role 'user') can self-register.
     // Doctors and admins must be created by an admin via a separate endpoint.
     const role = 'user';
@@ -50,13 +60,20 @@ exports.verifyEmail = async (req, res) => {
   try {
     const { token } = req.params;
 
+    // First check if a user with this token exists
     const result = await pool.query(
-      `SELECT * FROM users WHERE verification_token = $1`,
+      `SELECT id, is_verified FROM users WHERE verification_token = $1`,
       [token]
     );
 
     if (result.rows.length === 0) {
-      return res.status(400).json({ message: 'Invalid or expired token' });
+      // Token not found — check if it was already used (account already verified)
+      return res.status(400).json({ message: 'This verification link has already been used or is invalid. If you are not yet verified, request a new link below.' });
+    }
+
+    if (result.rows[0].is_verified) {
+      // Already verified — treat as success
+      return res.json({ message: 'Email is already verified. You can log in.' });
     }
 
     await pool.query(
@@ -622,24 +639,34 @@ exports.getUserPlan = async (req, res) => {
     
     console.log('Getting plan for user:', userId);
     
-    // Get the most recent confirmed appointment that is not expired
+    // Get ALL active confirmed+paid appointments (not expired)
+    // Then pick the best plan: video-enabled first, then most recent date
     const result = await pool.query(
       `SELECT p.*, a.appointment_date, a.status, a.payment_status, a.doctor_id, a.id as appointment_id
        FROM appointments a
        JOIN plans p ON p.id = a.plan_id
-       WHERE a.patient_id = $1 
+       WHERE a.patient_id = $1
        AND a.status = 'confirmed'
        AND a.payment_status = 'paid'
        AND a.appointment_date >= CURRENT_DATE
-       ORDER BY a.appointment_date DESC
-       LIMIT 1`,
+       ORDER BY a.appointment_date DESC`,
       [userId]
     );
-    
+
     console.log('Active confirmed appointment query result:', result.rows.length);
-    
+
     if (result.rows.length > 0) {
-      const plan = result.rows[0];
+      // Pick best plan: prefer video-enabled over no-video, then most-recent date
+      let bestRow = result.rows[0];
+      for (const row of result.rows) {
+        let f = row.features;
+        if (typeof f === 'string') { try { f = JSON.parse(f); } catch { f = {}; } }
+        let bf = bestRow.features;
+        if (typeof bf === 'string') { try { bf = JSON.parse(bf); } catch { bf = {}; } }
+        // Upgrade to this row if it has video and the current best doesn't
+        if (f.video && !bf.video) { bestRow = row; }
+      }
+      const plan = bestRow;
       let features = plan.features;
       if (typeof features === 'string') {
         try {

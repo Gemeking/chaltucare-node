@@ -131,8 +131,8 @@ const updateResult = await client.query(
 
         // Update appointment status
         const appointmentResult = await client.query(
-            `UPDATE appointments 
-             SET payment_status = 'pending', 
+            `UPDATE appointments
+             SET payment_status = 'pending_verification',
                  status = 'pending',
                  updated_at = CURRENT_TIMESTAMP,
                  notes = COALESCE(notes, '') || '\nPayment Screenshot: ' || $1
@@ -211,16 +211,20 @@ async verifyPayment(req, res) {
 
             console.log('Payment verified and appointment confirmed:', appointmentResult.rows[0]);
 
+            const patientId = appointmentResult.rows[0].patient_id;
+
+            // Emit real-time plan-updated event so patient's chat page unlocks immediately
+            if (global.emitToUser) {
+                global.emitToUser(patientId, 'plan-updated', {
+                    appointment_id,
+                    message: 'Your payment has been verified. Chat is now unlocked!'
+                });
+            }
+
             // Send notification to patient
             if (global.sendNotification) {
-                // Get patient info
-                const patientInfo = await client.query(
-                    `SELECT name, email FROM users WHERE id = $1`,
-                    [appointmentResult.rows[0].patient_id]
-                );
-                
                 await global.sendNotification(
-                    appointmentResult.rows[0].patient_id,
+                    patientId,
                     'payment_verified',
                     'Payment Verified!',
                     `Your payment has been verified. Your appointment is now confirmed.`,

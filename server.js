@@ -123,6 +123,18 @@ const sendNotification = async (userId, type, title, message, data = null) => {
 
 global.sendNotification = sendNotification;
 
+// Helper to emit a socket event directly to a specific user
+global.emitToUser = (userId, event, data) => {
+    const socketId = connectedUsers.get(parseInt(userId));
+    if (socketId) {
+        io.to(socketId).emit(event, data);
+        return true;
+    }
+    // Also try the user room (handles multiple tabs)
+    io.to(`user:${userId}`).emit(event, data);
+    return false;
+};
+
 io.on('connection', (socket) => {
     console.log(`✅ User connected: ${socket.userId} (${socket.userRole})`);
     
@@ -239,6 +251,9 @@ io.on('connection', (socket) => {
             
             await pool.query(`INSERT INTO call_invitations (call_id, inviter_id, invitee_id, status) VALUES ($1, $2, $3, 'pending')`, [call.id, callerId, receiverId]);
             
+            // Notify caller with the DB callId so end-call can reference it
+            socket.emit('call-initiated', { callId: call.id });
+
             const receiverSocketId = connectedUsers.get(parseInt(receiverId));
             if (receiverSocketId) {
                 io.to(receiverSocketId).emit('incoming-call', { callId: call.id, callerId: callerId, callerName: callerName || 'User', callType: callType, signal: signal });
@@ -300,26 +315,42 @@ io.on('connection', (socket) => {
     
     socket.on('end-call', async (data) => {
         try {
-            const { callId } = data;
+            const { callId, to } = data;
             const userId = socket.userId;
-            const pool = require('./src/config/db');
-            
-            const callResult = await pool.query(`SELECT started_at FROM video_calls WHERE id = $1`, [callId]);
-            let duration = 0;
-            if (callResult.rows.length > 0 && callResult.rows[0].started_at) {
-                const startTime = new Date(callResult.rows[0].started_at);
-                const endTime = new Date();
-                duration = Math.floor((endTime - startTime) / 1000);
+            let otherUserId = null;
+
+            if (callId) {
+                try {
+                    const pool = require('./src/config/db');
+
+                    const callResult = await pool.query(`SELECT started_at FROM video_calls WHERE id = $1`, [callId]);
+                    let duration = 0;
+                    if (callResult.rows.length > 0 && callResult.rows[0].started_at) {
+                        duration = Math.floor((new Date() - new Date(callResult.rows[0].started_at)) / 1000);
+                    }
+
+                    await pool.query(`UPDATE video_calls SET status = 'ended', ended_at = CURRENT_TIMESTAMP, duration = $2 WHERE id = $1`, [callId, duration]);
+
+                    const callDetails = await pool.query(`SELECT caller_id, receiver_id FROM video_calls WHERE id = $1`, [callId]);
+                    if (callDetails.rows.length > 0) {
+                        otherUserId = callDetails.rows[0].caller_id === userId
+                            ? callDetails.rows[0].receiver_id
+                            : callDetails.rows[0].caller_id;
+                    }
+                } catch (dbErr) {
+                    console.error('DB error in end-call:', dbErr);
+                }
             }
-            
-            await pool.query(`UPDATE video_calls SET status = 'ended', ended_at = CURRENT_TIMESTAMP, duration = $2 WHERE id = $1`, [callId, duration]);
-            
-            const callDetails = await pool.query(`SELECT caller_id, receiver_id FROM video_calls WHERE id = $1`, [callId]);
-            if (callDetails.rows.length > 0) {
-                const otherUserId = callDetails.rows[0].caller_id === userId ? callDetails.rows[0].receiver_id : callDetails.rows[0].caller_id;
+
+            // Fallback: use the explicit `to` field if DB lookup didn't find the other user
+            if (!otherUserId && to) {
+                otherUserId = parseInt(to);
+            }
+
+            if (otherUserId) {
                 const otherSocketId = connectedUsers.get(otherUserId);
                 if (otherSocketId) {
-                    io.to(otherSocketId).emit('call-ended', { callId: callId });
+                    io.to(otherSocketId).emit('call-ended', { callId });
                 }
             }
         } catch (error) {
