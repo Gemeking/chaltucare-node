@@ -12,6 +12,8 @@ const server = http.createServer(app);
 const allowedOrigins = [
     'http://localhost:3000',
     process.env.FRONTEND_URL,
+    process.env.FRONTEND_URL?.replace('https://www.', 'https://'),
+    process.env.FRONTEND_URL?.replace('https://', 'https://www.'),
 ].filter(Boolean);
 
 const io = socketIo(server, {
